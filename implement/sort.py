@@ -97,7 +97,6 @@ class Sort():
 
         return detections # 반환된 detections는 리스트 형태로, 각 객체의 bbox, confidence, class_id를 포함한다. 
 
-
     def iou(self, box1, box2):
         ''' 
         IoU 계산
@@ -132,17 +131,16 @@ class Sort():
         iou_threshold = 0.3 (sort 논문값 이용)
         trackers = 칼만 필터로 예측된 기존 tracker의 상태 리스트 
         '''
-        tracker = []    
+        trackers = []    
         for i, state in enumerate(trackers):
-            tracker.append({
+            trackers.append({
                 'bbox': kalman_state_to_bbox(state), 
                 'class_id': state[4],  
                 'object_index': i}) 
         # tracker는 [{'bbox': [x1,y1,x2,y2]},{'class_id': class_id},{'object_index': i}]
 
-        print("||","tracker 수:", len(tracker) ,"|","검출된 객체 수:",len(detections)) # 디버그용
         
-        for i in range(len(tracker)):
+        for i in range(len(trackers)):
             for j in range(len(detections)):
                 iou = self.iou(tracker[i]['bbox'], detections[j]['bbox'])
                 if iou < iou_threshold:
@@ -163,20 +161,6 @@ class Sort():
 
 
 
-
-
-            
-    
-    
-'''
-sort 클래스 최종 반환 형태
-matched_indices = [(tracker_index, detection_index), ...] 
-unmacthced_trackers = []
-unmatched_detections = []
-'''
-
-
-
 class kalman():
     def __init__(self):
         ''' 
@@ -194,16 +178,6 @@ class kalman():
         self.kf.H[1, 1] = 1  # v    
         self.kf.H[2, 2] = 1  # s
         self.kf.H[3, 3] = 1  # r 
-
-    def track_init(self, bbox, class_id):
-        ''' 새로운 객체 추적 초기화 '''
-        self.kf.x[0] = bbox[0] + (bbox[2] - bbox[0]) / 2    
-        self.kf.x[1] = bbox[1] + (bbox[3] - bbox[1]) / 2
-        self.kf.x[2] = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])  # s
-        self.kf.x[3] = (bbox[2] - bbox[0])
-        self.kf.x[4] = class_id  # class
-        self.kf.x[5] = 0  # u_dot
-        self.kf.x[6] = 0  # v_dot
     
     def predict(self):
         ''' 칼만 필터 예측 '''
@@ -258,9 +232,4 @@ if  __name__ == "__main__":
     cap.release()
     cv2.destroyAllWindows()
 
-    ----------------------
-지금 너무 헷갈리는게 
-detections = [{bbox: [],confidence:n, class_id :n, 객체 고유번호: n}, {...}, ]
- 
-track_object = [ {state : [7개], class_id: n, 객체 고유번호 : n}]
-trackers = [track_object(), track_object(), ...]
+
