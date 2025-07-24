@@ -69,7 +69,7 @@ def kalman_state_to_bbox(state):
 
 
 
-class Sort():
+class Sort:
     def __init__(self, ):
         ''' SORT 알고리즘 초기화 '''
         self.tracked_objects = []  # 추적 중인 객체 리스트  
@@ -96,6 +96,7 @@ class Sort():
                     })
 
         return detections # 반환된 detections는 리스트 형태로, 각 객체의 bbox, confidence, class_id를 포함한다. 
+
 
     def iou(self, box1, box2):
         ''' 
@@ -139,29 +140,27 @@ class Sort():
                 'object_index': i}) 
         # tracker는 [{'bbox': [x1,y1,x2,y2]},{'class_id': class_id},{'object_index': i}]
 
-        
+        cost_matrix = np.zeros((len(trackers), len(detections)))
+
         for i in range(len(trackers)):
             for j in range(len(detections)):
-                iou = self.iou(tracker[i]['bbox'], detections[j]['bbox'])
-                if iou < iou_threshold:
-                    continue
-                # IoU가 임계값 이상인 경우 매칭 후보로 추가
-                tracker[i]['iou'] = iou
-                tracker[i]['detection_index'] = j
+                cost_matrix[i,j] = 1 - self.iou(trackers[i]['bbox'], detections[j]['bbox'])
+                if cost_matrix[i,j] < 1 - iou_threshold:
+                    cost_matrix[i,j] = 1
 
 
-        # 헝가리안 알고리즘을 이용하여 최적 매칭
-        cost_matrix = np.zeros((len(tracker), len(detections)))
-        for i in range(len(tracker)):
-            for j in range(len(detections)):
-                cost_matrix[i, j] = 1 - tracker[i]['iou'] if 'iou' in tracker[i] else 1
         row_ind, col_ind = linear_sum_assignment(cost_matrix) # row_ind = tracker index, col_ind = detection index
+        matched_indices = []  # 매칭된 인덱스 리스트     
+        for i in range(len(row_ind)):
+            if cost_matrix[row_ind[i], col_ind[i]] < 0.3:
+                matched_indices.append((row_ind[i], col_ind[i]))   
+
+
         
-        
 
 
 
-class kalman():
+class kalman:
     def __init__(self):
         ''' 
         칼만 필터 초기화 
@@ -190,11 +189,16 @@ class kalman():
         self.kf.x = self.kf.update(z)   
         return self.kf.x    
 
+    
 
-class tracked_list(Sort,kalman):
-    def __init__(self, ):
-        self.tracked_objects = []  # 추적 중인 객체 리스트
+class Tracker:
+    def __init__(self,bbox, class_id, object_index):
+        self.kf = kalman()  # 칼만 필터 초기화
+        self.state = self.kf.update(bbox)
+        self.class_id = class_id
+        self.object_index = object_index  # 객체 인덱스
 
+    
 
 if  __name__ == "__main__":
     sort = Sort()
@@ -209,7 +213,9 @@ if  __name__ == "__main__":
             print("No frame to process.")
             break       
 
-
+        if not success:
+            print("Failed to read frame from video.")
+            break               
         results = sort.detection(frame)  # YOLOv8 모델을 이용한 객체 탐지
         if results:
             detections = sort.extract_detections(results)
