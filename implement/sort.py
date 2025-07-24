@@ -153,8 +153,20 @@ class Sort:
         matched_indices = []  # 매칭된 인덱스 리스트     
         for i in range(len(row_ind)):
             if cost_matrix[row_ind[i], col_ind[i]] < 0.3:
-                matched_indices.append((row_ind[i], col_ind[i]))   
+                matched_indices.append((row_ind[i], col_ind[i]))
 
+        # matched_indices는 [(tracker_index, detection_index), ...] 형태로 매칭된 인덱스 리스트
+        
+        # 구현 : detection index를 이용해 그에 매칭된 tracker index 정보를 덮어쓴다.  
+        #     : 그리고 안 매칭된 detections에 남은 객체를 trackers 리스트에 추가한다. 
+        #     : 매칭 안된 trackers는 history 리스트에 넣고, 다음 프레임에도 검출이 안되면 (같은 클래스id와 고유번호가 일치하지 않으면) 리스트에서 제거한다. 
+
+        unmatced_trackers = []
+        unmatced_detections = []
+
+        trackers = 매칭된 놈 + unmatced_detections 
+
+        return trackers, unmatced_trackers #반환 형태는 trackers, unmatched_trackers = [{'bbox': [x1,y1,x2,y2], 'class_id': class_id, 'object_index': i}, ...] 
 
         
 
@@ -178,9 +190,10 @@ class kalman:
         self.kf.H[2, 2] = 1  # s
         self.kf.H[3, 3] = 1  # r 
     
-    def predict(self):
+    def predict(self,):
         ''' 칼만 필터 예측 '''
-        self.kf.predict()
+        # 이전 상태를 알고잇어야하네...
+        self.kf.predict(이전상태..? 뭐지 그냥 저장되어있는건가?)
         return self.kf.x
 
     def update(self, bbox):
@@ -191,12 +204,6 @@ class kalman:
 
     
 
-class Tracker:
-    def __init__(self,bbox, class_id, object_index):
-        self.kf = kalman()  # 칼만 필터 초기화
-        self.state = self.kf.update(bbox)
-        self.class_id = class_id
-        self.object_index = object_index  # 객체 인덱스
 
     
 
@@ -215,25 +222,43 @@ if  __name__ == "__main__":
 
         if not success:
             print("Failed to read frame from video.")
-            break               
-        results = sort.detection(frame)  # YOLOv8 모델을 이용한 객체 탐지
-        if results:
-            detections = sort.extract_detections(results)
-            if not detections:
-                print("No relevant detections found.")
-                continue
-        
+            break 
+        # 한 프레임마다 전체 알고리즘 반복
+        frame_num = 0
+
+            
+            results = sort.detection(frame)  # YOLOv8 모델을 이용한 객체 탐지
+            if results:
+                detections = sort.extract_detections(results)
+                if not detections:
+                    print("No relevant detections found.")
+                    continue
+            if frame_num == 0:
+                # 첫 프레임에서는 칼만 필터 초기화 및 tracker 생성
 
 
+            else:
+            # 이후 프레임에서는 기존 tracker와 새로운 detections를 매칭
+            # 매칭된 trackers를 칼만 필터로 업데이트
+                trackers = 
+            
+                trackers, unmatced_trackers = sort.match(detections, sort.tracked_objects,iou_threshold=0.3)
+                # 매칭된 trackers를 업데이트
+                for tracker in trackers:
+                    kf = kalman()
+                    kf.update(tracker['bbox'])
+                    tracker['bbox'] = kalman_state_to_bbox(kf.x)      
 
-            # 결과 처리 및 시각화 로직 추가
-            annotated_frame = results[0].plot()
-            cv2.imshow("YOLOv8 Inference", annotated_frame)
+            frame_num += 1    
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+                # 결과 처리 및 시각화 로직 추가
+                annotated_frame = results[0].plot()
+                cv2.imshow("YOLOv8 Inference", annotated_frame)
+
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            else:
                 break
-        else:
-            break
     
     cap.release()
     cv2.destroyAllWindows()
