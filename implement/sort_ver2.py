@@ -7,13 +7,11 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
-# YOLOv8 모델 로드
+
 model = YOLO("yolov8n.pt")
 
-# ===================== 칼만 상태 변환 =====================
-
-# 바운딩 박스를 칼만 필터 상태로 변환
 def bbox_to_kalman_state(bbox):
+    # 바운딩 박스를 칼만 필터 상태로 변환
     u = bbox[0] + (bbox[2] - bbox[0]) / 2
     v = bbox[1] + (bbox[3] - bbox[1]) / 2
     s = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
@@ -21,9 +19,18 @@ def bbox_to_kalman_state(bbox):
     
     return np.array([u, v, s, r, 0, 0, 0])
 
-# 칼만 필터 상태를 바운딩 박스로 변환
+
 def kalman_state_to_bbox(state):
+    # 칼만 필터 상태를 바운딩 박스로 변환
     u, v, s, r = state[0], state[1], state[2], state[3]
+
+    #디버깅용
+    s_r = s * r
+    if not np.isfinite(s_r):
+        raise ValueError(f"[ERROR] s * r is not finite! Got s={s}, r={r}, s*r={s_r}")
+    if s_r < 0:
+        raise ValueError(f"[ERROR] s * r is negative! Got s={s}, r={r}, s*r={s_r}")
+    
     w = np.sqrt(s * r)
     h = s / w
     x1 = u - w / 2
@@ -50,32 +57,57 @@ class KalmanBox:
         self.kf.R *= 10 # 관측 잡음 공분산 행렬
         self.kf.Q *= 0.01 # 프로세스 잡음 공분산 행렬
 
-    # 칼만 필터 예측
+    
     def predict(self):
+        # 칼만 필터 예측
+        s_before = self.kf.x[2]
+        ds_before = self.kf.x[6]
+
         self.kf.predict()
+        
+        #디버깅용
+        # 예측 상태에서 s, r 추출
+        s_after = self.kf.x[2]
+        r = self.kf.x[3]
+        s_r = s_after * r
+        # NaN, inf, 음수 체크 → 오류 발생시 중단
+        if not np.isfinite(s_after):
+            raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
+        if not np.isfinite(r):
+            raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
+        if not np.isfinite(s_r):
+            raise ValueError(f"[PREDICT ERROR] s*r is not finite: s={s_after}, r={r}, s*r={s_r}")
+        if s_after <= 0:
+            raise ValueError(f"[PREDICT ERROR] s predicted as {s_after} (s_before={s_before}, ds={ds_before})")
+        if r <= 0:
+            raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
+        if s_r <= 0:
+            raise ValueError(f"[PREDICT ERROR] s*r is non-positive: s*r={s_r}")
+        
         return kalman_state_to_bbox(self.kf.x)
     
-    # 칼만 필터 업데이트
+    
     def update(self, bbox):
+        # 칼만 필터 업데이트
         z = bbox_to_kalman_state(bbox)
+        z = z[:4].reshape((4, 1))
         self.kf.update(z)
         return kalman_state_to_bbox(self.kf.x)
 
 # ===================== SORT 클래스 =====================
 class Sort:
-    # SORT 알고리즘 초기화
-    # 추적중인 객체 리스트와 추적 ID 초기화
     def __init__(self):
+        # SORT 알고리즘 초기화
+        # 추적중인 객체 리스트와 추적 ID 초기화
         self.tracked_objects = []
         self.track_id = 0
 
-    # YOLO 모델 호출 후 탐지 수행.
     def detection(self, frame):
         return model(frame)
 
-    # car와 truck 객체를 필터링 (2: car, 3: truck)
-    # bbox와 confidence 정보를 포함한 detection 리스트 반환
     def extract_detections(self, frame):
+        # car와 truck 객체를 필터링 (2: car, 3: truck)
+        # bbox와 confidence 정보를 포함한 detection 리스트 반환
         detections = []
         results = self.detection(frame)
         for result in results:
@@ -87,16 +119,9 @@ class Sort:
                         'confidence': box.conf[0].item()
                     })
         return detections
-    '''
-    기존 효정이 주석
-    IoU 계산
-        iou는 무조건 bbox형태의 인자만 받아야한다 !!
-        box1 와 box2는 [x1, y1, x2, y2] 형태의 리스트
-        box1은 칼만필터로 예측된 기존 tracker의 bbox
-        box2는 새로운 detection의 bbox = detections[n]['bbox']
-    '''
-    # 두 박스의 IoU 계산(교집합 영역의 비율)
+    
     def iou(self, box1, box2):
+        # 두 박스의 IoU 계산(교집합 영역의 비율)
         xA = max(box1[0], box2[0]) # 교차 영역의 왼쪽 x 좌표
         yA = max(box1[1], box2[1]) # 교차 영역의 위쪽 y 좌표
         xB = min(box1[2], box2[2]) # 교차 영역의 오른쪽 x 좌표
@@ -118,12 +143,8 @@ class Sort:
     # 매칭된 트래커와 새로운 detection을 비교하여 IoU 기반으로 매칭
     # 매칭된 트래커, 매칭되지 않은 트래커, 매칭되지 않은 detection 반환
     # 헝가리안 알고리즘으로 detections와 trackers를 매칭
-    '''
-    arguments
-        iou_threshold = 0.3 (sort 논문값 이용)
-        trackers = 칼만 필터로 예측된 기존 tracker의 상태 리스트 
-    '''
-    def match(self, detections, trackers, iou_threshold=0.3): #iou_threshold는 IoU 임계값
+
+    def match(self, detections, trackers, iou_threshold=0.3):
 
         if len(trackers) == 0: # 트래커가 없으면 매칭할 필요 없음
             return [], [], list(range(len(detections))) 
@@ -137,7 +158,7 @@ class Sort:
 
         # 매칭된 트래커와 detection을 저장
         matches = []
-        unmatched_trackers = [list(range(len(trackers)))]
+        unmatched_trackers = list(range(len(trackers)))
         unmatched_detections = list(range(len(detections))) 
 
         # 매칭된 트래커와 detection을 IoU 임계값에 따라 필터링
@@ -186,33 +207,6 @@ class Sort:
         return self.tracked_objects
 
 # ===================== 메인 =====================
-'''
-효정이 코드 보니까 main 함수 코드에서 tracker랑 detections를 매칭하는 로직이 있는데
-main 함수는 항상 딱 실행만 시키고, 추적 로직은 Sort 클래스 안에 구현되어 있어야해.
-
-main함수는 볼줄 아니까 주석 안달을게 어제 효정이가 구현한 코드랑 이거랑 비교해봐.
-실행도 시켜보고
-근데, 그거 안넣었어 82-85줄에 있는 코드 'class_id' 빼먹었으니까
-객체감지에 추가할거 추가해야 할 것 같아.
-
-어제 고민했던 그 객체를 검출하고 매칭한다음 추출하는 부분을 update() 함수로 구현했어. (사실 gpt가 작성한 코드인데...)
-그거를 근데 확실히 알고 넘어가야 할 것같아
-이게 헝가리안 알고리즘이랑 칼만필터 각각 보면 이해하는데 이걸 SORT알고리즘으로 묶는거는 확실히
-코드를 봐야 이해가 가능할거같아 그냥 생각해서 이해는 절대 못해
-근데 이거 한번 이해하면 진짜 유용한게
-영상처리 기반 객체 검출에서의 완전 기본기니까
-코드 이해하고 효정이가 안보고 구현하는걸 한번 더 해보는게 좋을 것 같아
-여보 똑똑해서 금방 이해 할거같아 난 이해하는걸 포기 했지만 (사실 거의 다 이해한듯 수학적인거 빼고 역시 효정이의 설명 GOAT)
-그래도 주석 열심히 달아놓았으니까 한줄한줄 봐야해.
-
-그리고 이거 코드창 띄우고 여보 코드창 띄우고 뭐가 잘못되었는지 어디부분이 약한지 비교하면서 스스로 분석을 해서 적어놔
-그래야 다른 알고리즘이든 뭐든 구현 할 때 그게 도움이 될거야.
-어디서 어떻게 구현을 해야지 틀, 그 틀을 잡을 수 있어.
-이게 스스로 코드 분석 하는법이라서 클린코딩에 도움 돼;
-
-나는 늦게 일어날거같으니까... 오늘 하루도 힘내 금욜이니까!! 사랑해!
-'''
-
 if __name__ == "__main__":
     sort = Sort()
     cap = cv2.VideoCapture("dongwon_building-09.avi")
