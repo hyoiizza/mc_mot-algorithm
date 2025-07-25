@@ -57,38 +57,59 @@ class KalmanBox:
         self.kf.Q *= 0.01 # 프로세스 잡음 공분산 행렬
     
     def predict(self):
-        # 칼만 필터 예측
-        s_before = self.kf.x[2]
-        ds_before = self.kf.x[6]
 
-        self.kf.predict()
-        
-        #디버깅용
-        # 예측 상태에서 s, r 추출
-        s_after = self.kf.x[2]
-        r = self.kf.x[3]
-        s_r = s_after * r
-        # NaN, inf, 음수 체크 → 오류 발생시 중단
-        if not np.isfinite(s_after):
-            raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
-        if not np.isfinite(r):
-            raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
-        if not np.isfinite(s_r):
-            raise ValueError(f"[PREDICT ERROR] s*r is not finite: s={s_after}, r={r}, s*r={s_r}")
-        if s_after <= 0:
-            raise ValueError(f"[PREDICT ERROR] (s_predicted={s_after}) | (s_before={s_before}, ds={ds_before})")
-        if r <= 0:
-            raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
-        if s_r <= 0:
-            raise ValueError(f"[PREDICT ERROR] s*r is non-positive: s*r={s_r}")
-        
+
+        try:
+            # 칼만 필터 예측
+            s_before = self.kf.x[2]
+            ds_before = self.kf.x[6]
+            self.kf.predict()
+
+        except ValueError as e:
+            #디버깅용
+            # 예측 상태에서 s, r 추출
+            s_after = self.kf.x[2]
+            r = self.kf.x[3]
+            s_r = s_after * r
+            # NaN, inf, 음수 체크 → 오류 발생시 중단
+            if not np.isfinite(s_after):
+                raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
+            if not np.isfinite(r):
+                raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
+            if s_after <= 0:
+                raise ValueError(f"[PREDICT ERROR] in || kalman predict (s_predicted={s_after}) | (s_before={s_before}, ds={ds_before})")
+            if r <= 0:
+                raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
+
         return kalman_state_to_bbox(self.kf.x)
     
     def update(self, bbox):
         # 칼만 필터 업데이트
         z = bbox_to_kalman_state(bbox)
         z = z[:4].reshape((4, 1))
-        self.kf.update(z)
+
+        try:
+            # 칼만 필터 예측
+            s_before = self.kf.x[2]
+            ds_before = self.kf.x[6]
+            self.kf.update(z)
+
+        except ValueError as e:
+            #디버깅용
+            # 예측 상태에서 s, r 추출
+            s_after = self.kf.x[2]
+            r = self.kf.x[3]
+            s_r = s_after * r
+            # NaN, inf, 음수 체크 → 오류 발생시 중단
+            if not np.isfinite(s_after):
+                raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
+            if not np.isfinite(r):
+                raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
+            if s_after <= 0:
+                raise ValueError(f"[PREDICT ERROR] in || kalman update (s_predicted={s_after}) | (s_before={s_before}, ds={ds_before})")
+            if r <= 0:
+                raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
+        
         return kalman_state_to_bbox(self.kf.x)
 
 # ===================== SORT 클래스 =====================
@@ -171,6 +192,7 @@ class Sort:
                 trk['bbox'] = trk['kf'].predict()
                 trk['age'] += 1
 
+            #디버깅용
             except ValueError as e:
                 print("\n====[TRACKING PREDICT ERROR]====")
                 print(f"class: {trk['class']}")
@@ -201,7 +223,7 @@ class Sort:
             })
 
         # 4. 매칭 안 된 tracker 삭제
-        max_age = 3
+        max_age = 0
         for t in sorted(unmatched_trks, reverse=True):
             self.tracked_objects[t]['time_since_update'] += 1
             
