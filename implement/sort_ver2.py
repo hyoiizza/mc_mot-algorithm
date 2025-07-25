@@ -178,7 +178,7 @@ class Sort:
                 print(f"bbox: {trk.get('bbox')}")
                 print(f"age: {trk.get('age')}")
                 print(f"time_since_update: {trk.get('time_since_update')}")
-                print(f"[Kalman State] s={trk['kf'].kf.x[2][0]}, ds={trk['kf'].kf.x[6][0]}")
+                print(f"[Kalman State] s={trk['kf'].kf.x[2]}, ds={trk['kf'].kf.x[6]}")
 
         matches, unmatched_trks, unmatched_dets = self.match(detections, self.tracked_objects)
 
@@ -201,7 +201,7 @@ class Sort:
             })
 
         # 4. 매칭 안 된 tracker 삭제
-        max_age = 0
+        max_age = 3
         for t in sorted(unmatched_trks, reverse=True):
             self.tracked_objects[t]['time_since_update'] += 1
             
@@ -213,7 +213,7 @@ class Sort:
 # ===================== 메인 =====================
 if __name__ == "__main__":
     sort = Sort()
-    cap = cv2.VideoCapture("dongwon_building-13.avi")
+    cap = cv2.VideoCapture("dongwon_building-09.avi")
 
     while cap.isOpened():
         success, frame = cap.read()
