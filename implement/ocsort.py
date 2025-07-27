@@ -218,6 +218,30 @@ class OCSort:
                 self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
                 self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
 
+         # 5. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
+        for t,d in re_id:
+            trk = self.tracked_objects[t]
+            z_start = trk['z_t_minus_1'] # re-id 되기 전의 마지막 tracking 값
+            z_end = detections[d]['bbox'] # re-id 된 tracking 값
+            num_missing_frame = frame_num - trk['start_missing_frame_num'] + 1
+
+            virtual_obs_list = []
+            for i in range(1,num_missing_frame+1):
+                alpha = i / (num_missing_frame+1)
+                z_virtual = (1 - alpha) * np.array(z_start) + alpha * np.array(z_end)
+                virtual_obs_list.append(z_virtual)
+            for z_virtual in virtual_obs_list:
+                trk['kf'].predict()
+                trk['bbox'] = trk['kf'].update(z_virtual)
+
+            # 마지막 진짜 detection으로 업데이트
+            trk['kf'].predict()
+            trk['bbox'] = trk['kf'].update(z_end)
+            trk['time_since_update'] = 0
+            trk['z_t_minus_2'] = trk['z_t_minus_1']
+            trk['z_t_minus_1'] = z_end
+            trk['start_missing_frame_num'] = 0
+
         # 3. 매칭 안 된 detection -> 새로운 트래커 생성
         for d in unmatched_dets:
             self.track_id += 1
@@ -242,30 +266,6 @@ class OCSort:
             
             if self.tracked_objects[t]['time_since_update'] >= max_age:
                 del self.tracked_objects[t] # 아예 관측되었던 object에서 삭제
-        
-        # 5. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
-        for t,d in re_id:
-            trk = self.tracked_objects[t]
-            z_start = trk['z_t_minus_1'] # re-id 되기 전의 마지막 tracking 값
-            z_end = detections[d]['bbox'] # re-id 된 tracking 값
-            num_missing_frame = frame_num - trk['start_missing_frame_num'] + 1
-
-            virtual_obs_list = []
-            for i in range(1,num_missing_frame+1):
-                alpha = i / (num_missing_frame+1)
-                z_virtual = (1 - alpha) * np.array(z_start) + alpha * np.array(z_end)
-                virtual_obs_list.append(z_virtual)
-            for z_virtual in virtual_obs_list:
-                trk['kf'].predict()
-                trk['bbox'] = trk['kf'].update(z_virtual)
-
-            # 마지막 진짜 detection으로 업데이트
-            trk['kf'].predict()
-            trk['bbox'] = trk['kf'].update(z_end)
-            trk['time_since_update'] = 0
-            trk['z_t_minus_2'] = trk['z_t_minus_1']
-            trk['z_t_minus_1'] = z_end
-            trk['start_missing_frame_num'] = 0
 
         return self.tracked_objects
 
@@ -273,6 +273,8 @@ class OCSort:
 if __name__ == "__main__":
     ocsort = OCSort()
     cap = cv2.VideoCapture("dongwon_building-09.avi")
+
+    frame_num = 0 
 
     while cap.isOpened():
         success, frame = cap.read()
@@ -284,23 +286,24 @@ if __name__ == "__main__":
         if not success:
             print("Failed to read frame from video.")
             break
-
-        frame_num = 0
         
-        while True:
-            detections = ocsort.extract_detections(frame) 
-            tracked = ocsort.update(detections,frame_num)
+    
+        detections = ocsort.extract_detections(frame) 
+        tracked = ocsort.update(detections,frame_num)
 
-            # 추적 결과 시각화
-            for trk in tracked:
-                x1, y1, x2, y2 = [int(v) for v in trk['bbox']]
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID {trk['id']}", (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # 추적 결과 시각화
+        for trk in tracked:
+            x1, y1, x2, y2 = [int(v) for v in trk['bbox']]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"ID {trk['id']}", (x1, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            cv2.imshow("OCSORT + YOLOv8 Tracking", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        cv2.imshow("OCSORT + YOLOv8 Tracking", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        cap.release()
-        cv2.destroyAllWindows()
+        frame_num += 1
+        print('현재',frame_num,'번째 frame')
+
+    cap.release()
+    cv2.destroyAllWindows()
