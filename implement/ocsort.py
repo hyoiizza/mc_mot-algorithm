@@ -8,6 +8,7 @@ from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
 
+
 model = YOLO("yolov8n.pt")
 
 def bbox_to_kalman_state(bbox):
@@ -98,6 +99,8 @@ class Sort:
         # 추적중인 객체 리스트와 추적 ID 초기화
         self.tracked_objects = []
         self.track_id = 0
+        self.z_t_minus_2 = None
+        self.z_t_minus_1 = None
 
     def detection(self, frame):
         return model(frame)
@@ -113,10 +116,11 @@ class Sort:
                     detections.append({
                         'bbox': [x1.item(), y1.item(), x2.item(), y2.item()],
                         'confidence': box.conf[0].item(),
-                        'class': int(box.cls[0])
+                        'class': int(box.cls[0]),
+
                     })
         return detections
-    
+
     def iou(self, box1, box2):
         # 두 박스의 IoU 계산(교집합 영역의 비율)
         xA = max(box1[0], box2[0]) # 교차 영역의 왼쪽 x 좌표
@@ -128,16 +132,35 @@ class Sort:
         area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
         area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
         return inter / float(area1 + area2 - inter + 1e-6) # 0으로 나누는 오류 방지
+    
+    def cosine_similarity(self,v1,v2):
+        v1 = np.array(v1) # v1 = v_tarck  (2프레임전 관측값 - 1프레임전 관측값)
+        v2 = np.array(v2) # v2 = v_candidate (1프레임전 관측값 - 현재관측값)
+        return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
-    def match(self, detections, trackers, iou_threshold=0.3):
+
+    def match(self, detections, trackers, iou_threshold=0.3,ocm_threhold = 0.3):
 
         if len(trackers) == 0: # 트래커가 없으면 매칭할 필요 없음
             return [], [], list(range(len(detections))) 
 
-        cost_matrix = np.zeros((len(trackers), len(detections))) # 비용 행렬 초기화
+        cost_iou = np.zeros((len(trackers), len(detections))) 
+        cost_ocm = np.zeros((len(trackers), len(detections)))  
+        cost_matrix = np.zeros((len(trackers), len(detections))) 
+
         for i, trk in enumerate(trackers):
-            for j, det in enumerate(detections):
-                cost_matrix[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) # IoU를 비용 행렬로 변환
+            if trk['z_t_minus_2']==None:
+                for j, det in enumerate(detections):
+                    cost_iou[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) 
+                    cost_ocm[i, j] = 0.0
+                    cost_matrix[i, j] = cost_iou + ocm_threhold*cost_ocm
+            else:
+                v1 = trk['z_t_minus_1'] - trk['z_t_minus_2']
+                for j, det in enumerate(detections):
+                    v2 = det['bbox'] - trk['z_t_minus_1']
+                    cost_iou[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) 
+                    cost_ocm[i, j] = 1 - self.cosine_similarity(v1,v2)
+                    cost_matrix[i, j] = cost_iou + ocm_threhold*cost_ocm # iou와 ocm cost 가중치 적용한 cost_matrix
 
         row_ind, col_ind = linear_sum_assignment(cost_matrix) # 헝가리안 알고리즘으로 최적 매칭
 
@@ -170,6 +193,7 @@ class Sort:
             try:
                 trk['bbox'] = trk['kf'].predict()
                 trk['age'] += 1
+        
 
             except ValueError as e:
                 print("\n====[TRACKING PREDICT ERROR]====")
@@ -186,6 +210,8 @@ class Sort:
         for t, d in matches:
             self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
             self.tracked_objects[t]['time_since_update'] = 0
+            self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
+            self.tracked_objects[t]['z_t_minus_2'] = self.tracked_objects[t]['z_t_minus_1']
 
         # 3. 매칭 안 된 detection -> 새로운 트래커 생성
         for d in unmatched_dets:
@@ -197,7 +223,9 @@ class Sort:
                 'bbox': detections[d]['bbox'],
                 'time_since_update': 0,
                 'age':1,
-                'class': detections[d]['class']
+                'class': detections[d]['class'],
+                'z_t_minus_1' : detections[d]['bbox'],
+                'z_t_minus_2' : self.z_t_minus_1
             })
 
         # 4. 매칭 안 된 tracker 삭제
