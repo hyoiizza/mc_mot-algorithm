@@ -136,7 +136,11 @@ class Sort:
     def cosine_similarity(self,v1,v2):
         v1 = np.array(v1) # v1 = v_tarck  (2프레임전 관측값 - 1프레임전 관측값)
         v2 = np.array(v2) # v2 = v_candidate (1프레임전 관측값 - 현재관측값)
-        return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+        if norm1==0 or norm2==0:
+            return 0.0
+        return np.dot(v1, v2) / (norm1 * norm2)
 
 
     def match(self, detections, trackers, iou_threshold=0.3,ocm_threhold = 0.3):
@@ -152,15 +156,15 @@ class Sort:
             if trk['z_t_minus_2']==None:
                 for j, det in enumerate(detections):
                     cost_iou[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) 
-                    cost_ocm[i, j] = 0.0
-                    cost_matrix[i, j] = cost_iou + ocm_threhold*cost_ocm
+                    cost_ocm[i, j] = 0
+                    cost_matrix[i, j] = cost_iou[i,j] + ocm_threhold*cost_ocm[i,j]
             else:
-                v1 = trk['z_t_minus_1'] - trk['z_t_minus_2']
+                v1 = np.array(trk['z_t_minus_1']) - np.array(trk['z_t_minus_2'])
                 for j, det in enumerate(detections):
-                    v2 = det['bbox'] - trk['z_t_minus_1']
+                    v2 = np.array(det['bbox']) - np.array(trk['z_t_minus_1'])
                     cost_iou[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) 
                     cost_ocm[i, j] = 1 - self.cosine_similarity(v1,v2)
-                    cost_matrix[i, j] = cost_iou + ocm_threhold*cost_ocm # iou와 ocm cost 가중치 적용한 cost_matrix
+                    cost_matrix[i, j] = cost_iou[i,j] + ocm_threhold*cost_ocm[i,j] # iou와 ocm cost 가중치 적용한 cost_matrix
 
         row_ind, col_ind = linear_sum_assignment(cost_matrix) # 헝가리안 알고리즘으로 최적 매칭
 
