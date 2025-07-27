@@ -88,7 +88,7 @@ class KalmanBox:
     def update(self, bbox):
         # 칼만 필터 업데이트
         z = bbox_to_kalman_state(bbox)
-        z = z[:4].reshape((4, 1))
+        z = np.atleast_2d(z[:4]).T
         self.kf.update(z)
         return kalman_state_to_bbox(self.kf.x)
 
@@ -117,7 +117,6 @@ class OCSort:
                         'bbox': [x1.item(), y1.item(), x2.item(), y2.item()],
                         'confidence': box.conf[0].item(),
                         'class': int(box.cls[0]),
-
                     })
         return detections
 
@@ -187,9 +186,9 @@ class OCSort:
             핵심 로직
             1. 기존 트래커들 predict()
             2. 매칭된 트래커 업데이트
-            3. 매칭 안 된 detection -> 새로운 트래커 생성, or re-id인지 확인
-            4. 매칭 안 된 tracker 삭제
-            5. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
+            3. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
+            4. 매칭 안 된 detection -> 새로운 트래커 생성, or re-id인지 확인
+            5. 매칭 안 된 tracker 삭제
         '''
         # 1. 기존 트래커 예측
         for trk in self.tracked_objects: # tracked_objects는 [{'id': id, 'kf': KalmanBox, 'bbox': [x1,y1,x2,y2]}, ...] 형태
@@ -203,7 +202,8 @@ class OCSort:
                 print(f"bbox: {trk.get('bbox')}")
                 print(f"age: {trk.get('age')}")
                 print(f"time_since_update: {trk.get('time_since_update')}")
-                print(f"[Kalman State] s={trk['kf'].kf.x[2]}, ds={trk['kf'].kf.x[6]}")
+                print(f"start_missing_frame_num: {trk.get('start_missing_frame_num')}")
+                print(f"[Kalman State] predict_s={trk['kf'].kf.x[2]}, ds={trk['kf'].kf.x[6]}")
 
         matches, unmatched_trks, unmatched_dets = self.match(detections, self.tracked_objects)
 
@@ -212,18 +212,18 @@ class OCSort:
         for t, d in matches:
             if self.tracked_objects[t]['time_since_update'] >=1: # re-id의 첫 번째 조건
                 re_id.append((t,d))
-            else:
+            else: 
                 self.tracked_objects[t]['time_since_update'] = 0
                 self.tracked_objects[t]['z_t_minus_2'] = self.tracked_objects[t]['z_t_minus_1']
                 self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
                 self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
 
-         # 5. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
+         # 3. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
         for t,d in re_id:
             trk = self.tracked_objects[t]
             z_start = trk['z_t_minus_1'] # re-id 되기 전의 마지막 tracking 값
             z_end = detections[d]['bbox'] # re-id 된 tracking 값
-            num_missing_frame = frame_num - trk['start_missing_frame_num'] + 1
+            num_missing_frame = frame_num - trk['start_missing_frame_num'] + 1 # 객체가 사라진 frame수 
 
             virtual_obs_list = []
             for i in range(1,num_missing_frame+1):
@@ -240,9 +240,9 @@ class OCSort:
             trk['time_since_update'] = 0
             trk['z_t_minus_2'] = trk['z_t_minus_1']
             trk['z_t_minus_1'] = z_end
-            trk['start_missing_frame_num'] = 0
+            trk['start_missing_frame_num'] = 're-identified!'
 
-        # 3. 매칭 안 된 detection -> 새로운 트래커 생성
+        # 4. 매칭 안 된 detection -> 새로운 트래커 생성
         for d in unmatched_dets:
             self.track_id += 1
             kf = KalmanBox(detections[d]['bbox'])
@@ -255,10 +255,10 @@ class OCSort:
                 'class': detections[d]['class'],
                 'z_t_minus_1' : detections[d]['bbox'],
                 'z_t_minus_2' : self.z_t_minus_1,
-                'start_missing_frame_num': frame_num
+                'start_missing_frame_num': 'not-yet'
             })    
 
-        # 4. 매칭 안 된 tracker 삭제
+        # 5. 매칭 안 된 tracker 삭제
         max_age = 3
         for t in sorted(unmatched_trks, reverse=True):
             self.tracked_objects[t]['time_since_update'] += 1
