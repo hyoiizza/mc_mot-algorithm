@@ -11,6 +11,7 @@ from scipy.optimize import linear_sum_assignment
 
 model = YOLO("yolov8n.pt")
 
+#===================== 헬퍼함수 ==============================
 def bbox_to_kalman_state(bbox):
     # 바운딩 박스를 칼만 필터 상태로 변환
     u = bbox[0] + (bbox[2] - bbox[0]) / 2
@@ -18,7 +19,7 @@ def bbox_to_kalman_state(bbox):
     g = (bbox[2] - bbox[0]) / (bbox[3] - bbox[1]) # 종횡비
     h =  bbox[3] - bbox[1] # 높이
     
-    return np.array([u, v, g, h, 0, 0, 0])
+    return np.array([u, v, g, h, 0, 0, 0, 0])
 
 def kalman_state_to_bbox(state):
     # 칼만 필터 상태를 바운딩 박스로 변환
@@ -32,6 +33,16 @@ def kalman_state_to_bbox(state):
     y2 = v + h / 2
 
     return [x1, y1, x2, y2]
+
+def cosine_similarity(v1,v2):
+    v1 = np.array(v1) 
+    v2 = np.array(v2)
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    if norm1==0 or norm2==0:
+        return 0.0
+    return np.dot(v1, v2) / (norm1 * norm2)
+
 
 # ===================== 칼만 필터 클래스 =====================
 class KalmanBox:
@@ -85,8 +96,9 @@ class KalmanBox:
         self.kf.update(z)
         return kalman_state_to_bbox(self.kf.x)
 
+
 # ===================== SORT 클래스 =====================
-class OCSort:
+class Deepsort:
     def __init__(self):
         # SORT 알고리즘 초기화
         # 추적중인 객체 리스트와 추적 ID 초기화
@@ -125,7 +137,6 @@ class OCSort:
         area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
         return inter / float(area1 + area2 - inter + 1e-6) # 0으로 나누는 오류 방지
     
-
     def match(self, detections, trackers, iou_threshold=0.3,ocm_threhold = 0.3):
 
         if len(trackers) == 0: # 트래커가 없으면 매칭할 필요 없음
@@ -141,7 +152,7 @@ class OCSort:
         # 매칭된 트래커와 detection을 저장
         matches = []
         unmatched_trackers = list(range(len(trackers)))
-        unmatched_detections = list(range(len(detections))) 
+        unmatched_detections = list(range(len(detections)))
 
         # 매칭된 트래커와 detection을 IoU 임계값에 따라 필터링
         for r, c in zip(row_ind, col_ind):
@@ -153,14 +164,15 @@ class OCSort:
         # 매칭된 트래커와 detection을 반환
         return matches, unmatched_trackers, unmatched_detections
 
-    def update(self, detections,frame_num):
+    def update(self, detections,iou_threshold=0.3):
         '''
             핵심 로직
             1. 기존 트래커들 predict()
             2. 매칭된 트래커 업데이트
-            3. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
-            4. 매칭 안 된 detection -> 새로운 트래커 생성, or re-id인지 확인
-            5. 매칭 안 된 tracker 삭제
+            3. 매칭 안 된 detection, trackers에 대해 두번째 매칭 (iou기반)
+            4. 두번째 매칭에 의해 매칭된 트래커 업데이트 
+            5. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
+            6. 트래커 삭제
         '''
         # 1. 기존 트래커 예측
         for trk in self.tracked_objects: # tracked_objects는 [{'id': id, 'kf': KalmanBox, 'bbox': [x1,y1,x2,y2]}, ...] 형태
@@ -174,48 +186,53 @@ class OCSort:
                 print(f"bbox: {trk.get('bbox')}")
                 print(f"age: {trk.get('age')}")
                 print(f"time_since_update: {trk.get('time_since_update')}")
-                print(f"start_missing_frame_num: {trk.get('start_missing_frame_num')}")
                 print(f"[Kalman State] predict_s={trk['kf'].kf.x[2]}, ds={trk['kf'].kf.x[6]}")
 
         matches, unmatched_trks, unmatched_dets = self.match(detections, self.tracked_objects)
 
         # 2. 매칭된 트래커 업데이트
-        re_id = [] # 매칭 후 re-id 선별 전 re-id 초기화
         for t, d in matches:
-            if self.tracked_objects[t]['time_since_update'] >=1: # re-id의 첫 번째 조건
-                re_id.append((t,d))
-            else: 
+            if self.tracked_objects[t]['state'] == 'confirmed':
                 self.tracked_objects[t]['time_since_update'] = 0
-                self.tracked_objects[t]['z_t_minus_2'] = self.tracked_objects[t]['z_t_minus_1']
-                self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
                 self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
+                self.tracked_objects[t]['hits'] +=1
 
-         # 3. re-id로 매칭된 tracker의 가상 궤적 보정 (OCR)
-        for t,d in re_id:
-            trk = self.tracked_objects[t]
-            z_start = trk['z_t_minus_1'] # re-id 되기 전의 마지막 tracking 값
-            z_end = detections[d]['bbox'] # re-id 된 tracking 값
-            num_missing_frame = frame_num - trk['start_missing_frame_num'] + 1 # 객체가 사라진 frame수 
+            if self.tracked_objects[t]['state'] == 'tentative':
+                self.tracked_objects[t]['hits'] +=1
+                self.tracked_objects[t]['time_since_update'] = 0
+                self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
+                
+                if self.tracked_objects[t]['hits'] >=3:
+                    self.tracked_objects[t]['state'] == 'confirmed'
 
-            virtual_obs_list = []
-            for i in range(1,num_missing_frame+1):
-                alpha = i / (num_missing_frame+1)
-                z_virtual = (1 - alpha) * np.array(z_start) + alpha * np.array(z_end)
-                virtual_obs_list.append(z_virtual)
-            for z_virtual in virtual_obs_list:
-                trk['kf'].predict()
-                trk['bbox'] = trk['kf'].update(z_virtual)
+        # 3. 매칭 안 된 detection, trackers에 대해 두번째 매칭 (iou기반)
+        cost_matrix_2 = np.zeros((len(unmatched_trks), len(unmatched_dets))) 
+        for i, d in enumerate(unmatched_dets):
+            for j, t in enumerate(unmatched_trks):
+                trk2 = self.tracked_objects[unmatched_trks[j]] # ========================
+                det2 = detections[unmatched_dets[i]] #=============================
+                cost_matrix_2[i, j] = 1 - self.iou(trk2['bbox'], det2['bbox']) 
 
-            # 마지막 진짜 detection으로 업데이트
-            trk['kf'].predict()
-            trk['bbox'] = trk['kf'].update(z_end)
-            trk['time_since_update'] = 0
-            trk['z_t_minus_2'] = trk['z_t_minus_1']
-            trk['z_t_minus_1'] = z_end
-            trk['start_missing_frame_num'] = 're-identified!'
+        row_ind, col_ind = linear_sum_assignment(cost_matrix_2)
+        
+        matches_2 = []
+        unmatched_trackers_2 = list(range(len(unmatched_trks)))
+        unmatched_detections_2 = list(range(len(unmatched_dets)))
 
-        # 4. 매칭 안 된 detection -> 새로운 트래커 생성
-        for d in unmatched_dets:
+        # 매칭된 트래커와 detection을 IoU 임계값에 따라 필터링
+        for r, c in zip(row_ind, col_ind):
+            if 1 - cost_matrix_2[r, c] > iou_threshold:
+                matches_2.append((r, c))
+                unmatched_trackers_2.remove(r)
+                unmatched_detections_2.remove(c)
+        # 4. 두번째 매칭에 의해 매칭된 트래커 업데이트 
+        for t,d in matches_2:
+            if self.tracked_objects[t]['state'] =='tentative':
+                self.tracked_objects[t]['hits'] +=1
+                self.tracked_objects[t]['time_since_update'] = 0
+                self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
+        # 5. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
+        for d in unmatched_detections_2:
             self.track_id += 1
             kf = KalmanBox(detections[d]['bbox'])
             self.tracked_objects.append({
@@ -225,25 +242,27 @@ class OCSort:
                 'time_since_update': 0,
                 'age':1,
                 'class': detections[d]['class'],
-                'z_t_minus_1' : detections[d]['bbox'],
-                'z_t_minus_2' : self.z_t_minus_1,
-                'start_missing_frame_num': 'not-yet'
-            })    
-
-        # 5. 매칭 안 된 tracker 삭제
+                'start_missing_frame_num': 'not-yet',
+                'state' : 'tentative',
+                'hits' : 1
+            }) 
+        # 6. 트래커 삭제 
         max_age = 3
-        for t in sorted(unmatched_trks, reverse=True):
+        for t in sorted(unmatched_trackers_2, reverse=True):
             self.tracked_objects[t]['time_since_update'] += 1
-            self.tracked_objects[t]['start_missing_frame_num'] = frame_num
-            
-            if self.tracked_objects[t]['time_since_update'] >= max_age:
+            #tentative 상태에서 삭제
+            if self.tracked_objects[t]['state']=='tentatvie' and self.tracked_objects[t]['time_since_update'] >= 3:
                 del self.tracked_objects[t] # 아예 관측되었던 object에서 삭제
+            #confirm 상태에서 삭제
+            elif self.tracked_objects[t]['state'] == 'confirmed' and self.tracked_objects[t]['time_since_update'] >= max_age:
+                del self.tracked_objects[t]
 
         return self.tracked_objects
 
+
 # ===================== 메인 =====================
 if __name__ == "__main__":
-    ocsort = OCSort()
+    deepsort = Deepsort()
     cap = cv2.VideoCapture("dongwon_building-09.avi")
 
     frame_num = 0 
@@ -260,8 +279,8 @@ if __name__ == "__main__":
             break
         
     
-        detections = ocsort.extract_detections(frame) 
-        tracked = ocsort.update(detections,frame_num)
+        detections = deepsort.extract_detections(frame) 
+        tracked = deepsort.update(detections,frame_num)
 
         # 추적 결과 시각화
         for trk in tracked:
@@ -270,7 +289,7 @@ if __name__ == "__main__":
             cv2.putText(frame, f"ID {trk['id']}", (x1, y1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        cv2.imshow("OCSORT + YOLOv8 Tracking", frame)
+        cv2.imshow("Deepsort + YOLOv8 Tracking", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
