@@ -7,8 +7,6 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
-
-
 model = YOLO("yolov8n.pt")
 
 def bbox_to_kalman_state(bbox):
@@ -39,6 +37,15 @@ def kalman_state_to_bbox(state):
     y2 = v + h / 2
 
     return [x1, y1, x2, y2]
+
+def cosine_similarity(v1,v2):
+    v1 = np.array(v1) # v1 = v_tarck  (2프레임전 관측값 - 1프레임전 관측값)
+    v2 = np.array(v2) # v2 = v_candidate (1프레임전 관측값 - 현재관측값)
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    if norm1==0 or norm2==0:
+        return 0.0
+    return np.dot(v1, v2) / (norm1 * norm2)
 
 # ===================== 칼만 필터 클래스 =====================
 class KalmanBox:
@@ -131,15 +138,6 @@ class OCSort:
         area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
         area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
         return inter / float(area1 + area2 - inter + 1e-6) # 0으로 나누는 오류 방지
-    
-    def cosine_similarity(self,v1,v2):
-        v1 = np.array(v1) # v1 = v_tarck  (2프레임전 관측값 - 1프레임전 관측값)
-        v2 = np.array(v2) # v2 = v_candidate (1프레임전 관측값 - 현재관측값)
-        norm1 = np.linalg.norm(v1)
-        norm2 = np.linalg.norm(v2)
-        if norm1==0 or norm2==0:
-            return 0.0
-        return np.dot(v1, v2) / (norm1 * norm2)
 
     def match(self, detections, trackers, iou_threshold=0.3,ocm_threhold = 0.3):
 
@@ -161,7 +159,7 @@ class OCSort:
                 for j, det in enumerate(detections):
                     v2 = np.array(det['bbox']) - np.array(trk['z_t_minus_1'])
                     cost_iou[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) 
-                    cost_ocm[i, j] = 1 - self.cosine_similarity(v1,v2)
+                    cost_ocm[i, j] = 1 - cosine_similarity(v1,v2)
                     cost_matrix[i, j] = cost_iou[i,j] + ocm_threhold*cost_ocm[i,j] # iou와 ocm cost 가중치 적용한 cost_matrix
 
         row_ind, col_ind = linear_sum_assignment(cost_matrix) # 헝가리안 알고리즘으로 최적 매칭
@@ -181,7 +179,7 @@ class OCSort:
         # 매칭된 트래커와 detection을 반환
         return matches, unmatched_trackers, unmatched_detections
 
-    def update(self, detections,frame_num):
+    def update(self, detections, frame_num):
         '''
             핵심 로직
             1. 기존 트래커들 predict()
