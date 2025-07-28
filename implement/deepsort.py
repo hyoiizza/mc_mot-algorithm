@@ -7,8 +7,6 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
-
-
 model = YOLO("yolov8n.pt")
 
 #===================== 헬퍼함수 ==============================
@@ -47,32 +45,25 @@ def cosine_similarity(v1,v2):
 # ===================== 칼만 필터 클래스 =====================
 class KalmanBox:
     def __init__(self, bbox):
-        self.kf = KalmanFilter(dim_x=7, dim_z=4) # 칼만 필터 초기화
+        self.kf = KalmanFilter(dim_x=8, dim_z=4) # 칼만 필터 초기화
         self.kf.x = bbox_to_kalman_state(bbox) # 칼만 필터 상태 초기화
         self.kf.P *= 1000. # 초기 오차 공분산 행렬
-        self.kf.F = np.eye(7) # 상태 전이 행렬
-        for i in range(4, 7):
-            self.kf.F[i - 4, i] = 1 # 칼만 필터 상태 전이 행렬
-        self.kf.H = np.zeros((4, 7)) # 관측 모델 행렬
-        self.kf.H[0, 0] = 1 # 칼만 필터 상태에서 x 좌표
-        self.kf.H[1, 1] = 1 # 칼만 필터 상태에서 y 좌표
-        self.kf.H[2, 2] = 1 # 칼만 필터 상태에서 너비
-        self.kf.H[3, 3] = 1 # 칼만 필터 상태에서 높이
-        self.kf.R *= 10 # 관측 잡음 공분산 행렬
-        self.kf.Q *= 0.01 # 프로세스 잡음 공분산 행렬
+        self.kf.F = np.eye(8) # 상태 전이 행렬
+        for i in range(4):
+            self.kf.F[i, i+4] = 1 # 칼만 필터 상태 전이 행렬
+        self.kf.H = np.zeros((4, 8)) # 관측 모델 행렬
+        self.kf.H[0, 0] = 1 # u
+        self.kf.H[1, 1] = 1 # v
+        self.kf.H[2, 2] = 1 # gamma
+        self.kf.H[3, 3] = 1 # h
+        # 공분산 설정
+        self.kf.R *= 10
+        self.kf.Q *= 0.01 
     
     def predict(self):
         # 칼만 필터 예측
-        s_before = self.kf.x[2]
-        ds_before = self.kf.x[6]
-
         self.kf.predict()
-        
         #디버깅용
-        # 예측 상태에서 s, r 추출
-        s_after = self.kf.x[2]
-        r = self.kf.x[3]
-        s_r = s_after * r
         # NaN, inf, 음수 체크 → 오류 발생시 중단
         if not np.isfinite(s_after):
             raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
@@ -137,16 +128,72 @@ class Deepsort:
         area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
         return inter / float(area1 + area2 - inter + 1e-6) # 0으로 나누는 오류 방지
     
-    def match(self, detections, trackers, iou_threshold=0.3,ocm_threhold = 0.3):
+    def mahalanobis_distance(self, trk_kf, detection_vec):
+        """
+        trk_kf: KalmanFilter 객체 (filterpy.kalman.KalmanFilter)
+        detection_vec: np.array([cx, cy, aspect_ratio, h]) shape=(4,)
+        """
+        # 예측 관측값 (4x1)
+        y = np.dot(trk_kf.H, trk_kf.x)  # shape (4, 1)
+        y = y.flatten()                 # shape (4,)
 
+        # 예측 관측 공분산 행렬 S = HPH^T + R
+        S = np.dot(np.dot(trk_kf.H, trk_kf.P), trk_kf.H.T) + trk_kf.R  # shape (4, 4)
+        S_inv = np.linalg.inv(S)
+
+        # 거리 계산
+        diff = detection_vec - y
+        dist = np.dot(np.dot(diff.T, S_inv), diff)
+        return dist
+
+    def ds_cnn(self, bbox, frame):
+        x1, y1, x2, y2 = bbox
+        img_crop = frame[y1:y2, x1:x2]
+
+        input = cv2.resize(img_crop, (128,256))
+        
+
+
+    def match(self, frame, detections, trackers, iou_threshold=0.3,alpha=0.5,maha_threshold=9.4877 ,appearance_threshold=0):
         if len(trackers) == 0: # 트래커가 없으면 매칭할 필요 없음
             return [], [], list(range(len(detections))) 
 
         cost_matrix = np.zeros((len(trackers), len(detections))) 
-        for i, trk in enumerate(trackers):
-            for j, det in enumerate(detections):
-                cost_matrix[i, j] = 1 - self.iou(trk['bbox'], det['bbox']) 
+        maha_dist = np.zeros((len(trackers), len(detections))) 
+        appearance = np.zeros((len(trackers), len(detections)))
+        appear_gate = np.zeros((len(trackers), len(detections)))
+        fin_gate = np.zeros((len(trackers), len(detections)))
+        maha_dist_gate = np.zeros((len(trackers), len(detections)))\
+        
+        for i, trk_idx in enumerate(trackers):
+            trk = self.tracked_objects[trk_idx]
+            kf = trk['kf']  # KalmanBox 객체
+            for j, det_idx in enumerate(detections):
+                det_bbox = detections[det_idx]['bbox']  # [x1, y1, x2, y2]
+                det_vec = bbox_to_kalman_state(det_bbox)[:4]  # [cx, cy, aspect, h]
 
+                # Mahalanobis distance 계산
+                maha = self.mahalanobis_distance(kf, det_vec)
+                maha_dist[i, j] = maha
+                if maha_dist[i,j] > maha_threshold: # 9.4877 = 95% 신뢰수준
+                    maha_dist_gate[i,j] = 1
+                else 
+                    maha_dist_gate[i,j] = 0
+
+                # cnn기반 외형정보 오차 계산
+                feature1 = self.ds_cnn(trk['bobx'])
+                feature2 = self.ds_cnn(det_bbox)
+                appearance[i,j] = 1 - cosine_similarity(feature1, feature2)
+                if appearance[i,j] > appearance_threshold:
+                    appear_gate[i,j] = 1
+                else 
+                    appear_gate[i,j] = 0
+                # 최종 cost 가중치 조합
+                fin_gate[i,j] = appear_gate[i,j] * maha_dist_gate[i,j]
+                cost_matrix[i, j] = fin_gate[i,j]{alpha*appearance[i,j] + (1-alpha)*maha_dist[i,j]}
+        
+
+        # time since update을 기준으로 우선 배정..
         row_ind, col_ind = linear_sum_assignment(cost_matrix) # 헝가리안 알고리즘으로 최적 매칭
 
         # 매칭된 트래커와 detection을 저장
@@ -154,7 +201,7 @@ class Deepsort:
         unmatched_trackers = list(range(len(trackers)))
         unmatched_detections = list(range(len(detections)))
 
-        # 매칭된 트래커와 detection을 IoU 임계값에 따라 필터링
+        # 매칭된 트래커와 detection을 IoU 임계값에 따라 필터링 , # time_since_update에 따라 우선 배정 로직 추가 필요
         for r, c in zip(row_ind, col_ind):
             if 1 - cost_matrix[r, c] > iou_threshold:
                 matches.append((r, c))
@@ -164,7 +211,7 @@ class Deepsort:
         # 매칭된 트래커와 detection을 반환
         return matches, unmatched_trackers, unmatched_detections
 
-    def update(self, detections,iou_threshold=0.3):
+    def update(self, frame,detections,iou_threshold=0.3):
         '''
             핵심 로직
             1. 기존 트래커들 predict()
@@ -188,7 +235,7 @@ class Deepsort:
                 print(f"time_since_update: {trk.get('time_since_update')}")
                 print(f"[Kalman State] predict_s={trk['kf'].kf.x[2]}, ds={trk['kf'].kf.x[6]}")
 
-        matches, unmatched_trks, unmatched_dets = self.match(detections, self.tracked_objects)
+        matches, unmatched_trks, unmatched_dets = self.match(frame, detections, self.tracked_objects)
 
         # 2. 매칭된 트래커 업데이트
         for t, d in matches:
@@ -280,7 +327,7 @@ if __name__ == "__main__":
         
     
         detections = deepsort.extract_detections(frame) 
-        tracked = deepsort.update(detections,frame_num)
+        tracked = deepsort.update(frame, detections)
 
         # 추적 결과 시각화
         for trk in tracked:
