@@ -207,6 +207,7 @@ class Deepsort:
             crop = frame[y1:y2, x1:x2] 
             feature = extract_feature_from_crop(crop, encoder, device='cpu')
             tracker_features.append(feature)
+            
         
         # detection feature 저장
         detection_features = []
@@ -216,6 +217,7 @@ class Deepsort:
             crop = frame[y1:y2, x1:x2]  
             feature = extract_feature_from_crop(crop, encoder, device='cpu')
             detection_features.append(feature)
+            detections[j]['feature'] = detection_features[j]
 
 
         for i, trk_idx in enumerate(trackers):
@@ -286,7 +288,7 @@ class Deepsort:
         return matches, unmatched_trackers, unmatched_detections
 
 
-    def update(self, frame,detections,iou_threshold=0.3):
+    def update(self, frame,detections,iou_threshold=0.3, ema_alpha = 0.9):
         '''
             핵심 로직
             1. 기존 트래커들 predict()
@@ -325,6 +327,8 @@ class Deepsort:
                 track['hits'] +=1
                 track['z_t_minus_2'] = track['z_t_minus_1']
                 track['z_t_minus_1'] = detection['bbox']
+                track['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
+                track['feature'] /= np.linalg.norm(track['feature']) + 1e-6 # L2 정규화
 
             if track['state'] == 'tentative':
                 track['hits'] +=1
@@ -332,6 +336,8 @@ class Deepsort:
                 track['bbox'] = track['kf'].update(detection['bbox'])
                 track['z_t_minus_2'] = track['z_t_minus_1']
                 track['z_t_minus_1'] = detection['bbox']
+                track['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
+                track['feature'] /= np.linalg.norm(track['feature']) + 1e-6
 
                 if track['hits'] >=3:
                     track['state'] = 'confirmed'
@@ -367,6 +373,7 @@ class Deepsort:
                 self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
                 self.tracked_objects[t]['z_t_minus_2'] = self.tracked_objects[t]['z_t_minus_1']
                 self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
+                self.tracked_objects[t]['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
 
         # 5. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
         for d in unmatched_detections_2:
@@ -383,7 +390,8 @@ class Deepsort:
                 'state' : 'tentative',
                 'hits' : 1,
                 'z_t_minus_1' : detections[d]['bbox'],
-                'z_t_minus_2' : detections[d]['bbox']
+                'z_t_minus_2' : detections[d]['bbox'],
+                'feature' : np.linalg.norm(detections[d]['feautre']) + 1e-6
             }) 
 
         # 6. 트래커 삭제 
@@ -416,6 +424,8 @@ if __name__ == "__main__":
         if not success:
             print("Failed to read frame from video.")
             break
+        
+        print('현재',frame_num,'번째 frame')
 
         detections = deepsort.extract_detections(frame) 
         tracked = deepsort.update(frame, detections)
@@ -426,15 +436,11 @@ if __name__ == "__main__":
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, f"ID {trk['id']}", (x1, y1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
         cv2.imshow("Deepsort + YOLOv8 Tracking", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-
+        
         frame_num += 1
-        print('현재',frame_num,'번째 frame')
-    
-    print
 
     cap.release()
     cv2.destroyAllWindows()
