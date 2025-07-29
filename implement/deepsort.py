@@ -374,11 +374,13 @@ class Deepsort:
                 self.tracked_objects[t]['z_t_minus_2'] = self.tracked_objects[t]['z_t_minus_1']
                 self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
                 self.tracked_objects[t]['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
+                self.tracked_objects[t]['feature'] /= np.linalg.norm(self.tracked_objects[t]['feature']) + 1e-6
 
         # 5. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
         for d in unmatched_detections_2:
             self.track_id += 1
             kf = KalmanBox(detections[d]['bbox'])
+            detections[d]['feature']/= np.linalg.norm(detections[d]['feautre']) + 1e-6
             self.tracked_objects.append({
                 'id': self.track_id,
                 'kf': kf,
@@ -391,7 +393,7 @@ class Deepsort:
                 'hits' : 1,
                 'z_t_minus_1' : detections[d]['bbox'],
                 'z_t_minus_2' : detections[d]['bbox'],
-                'feature' : np.linalg.norm(detections[d]['feautre']) + 1e-6
+                'feature' : detections[d]['feature']
             }) 
 
         # 6. 트래커 삭제 
