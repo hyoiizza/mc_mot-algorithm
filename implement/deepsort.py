@@ -367,14 +367,16 @@ class Deepsort:
         for trk_idx,det_idx in matches_2:
             t = unmatched_trks[trk_idx]
             d = unmatched_dets[det_idx]
-            if self.tracked_objects[t]['state'] =='tentative':
-                self.tracked_objects[t]['hits'] +=1
-                self.tracked_objects[t]['time_since_update'] = 0
-                self.tracked_objects[t]['bbox'] = self.tracked_objects[t]['kf'].update(detections[d]['bbox'])
-                self.tracked_objects[t]['z_t_minus_2'] = self.tracked_objects[t]['z_t_minus_1']
-                self.tracked_objects[t]['z_t_minus_1'] = detections[d]['bbox']
-                self.tracked_objects[t]['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
-                self.tracked_objects[t]['feature'] /= np.linalg.norm(self.tracked_objects[t]['feature']) + 1e-6
+            trk = self.tracked_objects[t]
+            det = detections[d]
+            if trk['state'] =='tentative':
+                trk['hits'] +=1
+                trk['time_since_update'] = 0
+                trk['bbox'] = trk['kf'].update(det['bbox'])
+                trk['z_t_minus_2'] = trk['z_t_minus_1']
+                trk['z_t_minus_1'] = det['bbox']
+                trk['feature'] = ema_alpha*trk['feature'] + (1-ema_alpha)*det['feature']
+                trk['feature'] /= np.linalg.norm(trk['feature']) + 1e-6
 
         # 5. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
         for d in unmatched_detections_2:
@@ -422,7 +424,6 @@ if __name__ == "__main__":
         if frame is None:
             print("No frame to process.")
             break       
-
         if not success:
             print("Failed to read frame from video.")
             break
