@@ -99,7 +99,7 @@ class KalmanBox:
         self.kf.update(z)
         return kalman_state_to_bbox(self.kf.x)
 
-# ===================== SORT 클래스 =====================
+# ===================== OCSORT 클래스 =====================
 class OCSort:
     def __init__(self):
         # SORT 알고리즘 초기화
@@ -302,6 +302,7 @@ if __name__ == "__main__":
 
         frame_num += 1
         print('현재',frame_num,'번째 frame')
-
+    for t in ocsort.tracked_objects:
+        print(ocsort.tracked_objects[t]['id'])
     cap.release()
     cv2.destroyAllWindows()
