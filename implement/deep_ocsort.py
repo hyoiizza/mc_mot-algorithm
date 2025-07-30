@@ -1,6 +1,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import time
 import torch
 from torchvision import transforms
 from PIL import Image
@@ -28,16 +29,17 @@ def bbox_to_kalman_state(bbox):
     # 바운딩 박스를 칼만 필터 상태로 변환
     u = bbox[0] + (bbox[2] - bbox[0]) / 2
     v = bbox[1] + (bbox[3] - bbox[1]) / 2
-    g = (bbox[2] - bbox[0]) / (bbox[3] - bbox[1]) # 종횡비
-    h =  bbox[3] - bbox[1] # 높이
+    s = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    r = (bbox[2] - bbox[0]) / (bbox[3] - bbox[1])
     
-    return np.array([u, v, g, h, 0, 0, 0, 0])
+    return np.array([u, v, s, r, 0, 0, 0, 0])
 
 def kalman_state_to_bbox(state):
     # 칼만 필터 상태를 바운딩 박스로 변환
-    u, v, g, h = state[0], state[1], state[2], state[3]
+    u, v, s, r = state[0], state[1], state[2], state[3]
     
-    w = g*h
+    w = np.sqrt(s * r)
+    h = s / w
 
     x1 = u - w / 2
     y1 = v - h / 2
@@ -60,13 +62,13 @@ def cosine_similarity(v1,v2):
 # ===================== 칼만 필터 클래스 =====================
 class KalmanBox:
     def __init__(self, bbox):
-        self.kf = KalmanFilter(dim_x=8, dim_z=4) # 칼만 필터 초기화
+        self.kf = KalmanFilter(dim_x=7, dim_z=4) # 칼만 필터 초기화
         self.kf.x = bbox_to_kalman_state(bbox) # 칼만 필터 상태 초기화
         self.kf.P *= 1000. # 초기 오차 공분산 행렬
-        self.kf.F = np.eye(8) # 상태 전이 행렬
+        self.kf.F = np.eye(7) # 상태 전이 행렬
         for i in range(4):
-            self.kf.F[i, i+4] = 1 # 칼만 필터 상태 전이 행렬
-        self.kf.H = np.zeros((4, 8)) # 관측 모델 행렬
+            self.kf.F[i-4, i] = 1 # 칼만 필터 상태 전이 행렬
+        self.kf.H = np.zeros((4, 7)) # 관측 모델 행렬
         self.kf.H[0, 0] = 1 # u
         self.kf.H[1, 1] = 1 # v
         self.kf.H[2, 2] = 1 # gamma
@@ -74,34 +76,63 @@ class KalmanBox:
         # 공분산 설정
         self.kf.R *= 10
         self.kf.Q *= 0.01 
-    
+
     def predict(self):
-        # 칼만 필터 예측
-        self.kf.predict()
-        '''
-        #디버깅용
-        # NaN, inf, 음수 체크 → 오류 발생시 중단
-        if not np.isfinite(s_after):
-            raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
-        if not np.isfinite(r):
-            raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
-        if not np.isfinite(s_r):
-            raise ValueError(f"[PREDICT ERROR] s*r is not finite: s={s_after}, r={r}, s*r={s_r}")
-        if s_after <= 0:
-            raise ValueError(f"[PREDICT ERROR] (s_predicted={s_after}) | (s_before={s_before}, ds={ds_before})")
-        if r <= 0:
-            raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
-        if s_r <= 0:
-            raise ValueError(f"[PREDICT ERROR] s*r is non-positive: s*r={s_r}")
-        '''
+
+
+        try:
+            # 칼만 필터 예측
+            s_before = self.kf.x[2]
+            ds_before = self.kf.x[6]
+            self.kf.predict()
+
+        except ValueError as e:
+            #디버깅용
+            # 예측 상태에서 s, r 추출
+            s_after = self.kf.x[2]
+            r = self.kf.x[3]
+            s_r = s_after * r
+            # NaN, inf, 음수 체크 → 오류 발생시 중단
+            if not np.isfinite(s_after):
+                raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
+            if not np.isfinite(r):
+                raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
+            if s_after <= 0:
+                raise ValueError(f"[PREDICT ERROR] in || kalman predict (s_predicted={s_after}) | (s_before={s_before}, ds={ds_before})")
+            if r <= 0:
+                raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
+
         return kalman_state_to_bbox(self.kf.x)
     
     def update(self, bbox):
         # 칼만 필터 업데이트
         z = bbox_to_kalman_state(bbox)
         z = np.atleast_2d(z[:4]).T
-        self.kf.update(z)
+
+        try:
+            # 칼만 필터 예측
+            s_before = self.kf.x[2]
+            ds_before = self.kf.x[6]
+            self.kf.update(z)
+
+        except ValueError as e:
+            #디버깅용
+            # 예측 상태에서 s, r 추출
+            s_after = self.kf.x[2]
+            r = self.kf.x[3]
+            s_r = s_after * r
+            # NaN, inf, 음수 체크 → 오류 발생시 중단
+            if not np.isfinite(s_after):
+                raise ValueError(f"[PREDICT ERROR] s is not finite: s={s_after}")
+            if not np.isfinite(r):
+                raise ValueError(f"[PREDICT ERROR] r is not finite: r={r}")
+            if s_after <= 0:
+                raise ValueError(f"[PREDICT ERROR] in || kalman update (s_predicted={s_after}) | (s_before={s_before}, ds={ds_before})")
+            if r <= 0:
+                raise ValueError(f"[PREDICT ERROR] r is non-positive: r={r}")
+        
         return kalman_state_to_bbox(self.kf.x)
+
 
 #====================== appearnce extractor: encoder =======
 transform = transforms.Compose([
@@ -134,6 +165,9 @@ class DeepOCsort:
         self.track_id = 0
         self.z_t_minus_2 = None
         self.z_t_minus_1 = None
+        self.prev_frame = None
+        self.camera_motion = np.array([0, 0])  # 초기 이동량
+
 
     def detection(self, frame):
         return model(frame)
@@ -144,13 +178,13 @@ class DeepOCsort:
         results = self.detection(frame)
         for result in results:
             for box in result.boxes:
-                if int(box.cls[0]) in [2, 3]: 
+                if int(box.cls[0]) in [2,3]: 
                     x1, y1, x2, y2 = box.xyxy[0]
                     detections.append({
                         'bbox': [x1.item(), y1.item(), x2.item(), y2.item()],
                         'confidence': box.conf[0].item(),
                         'class': int(box.cls[0]),
-                        'feature' : 'not yet'
+                        'feature' : np.zeros(128)
                     })
         return detections
 
@@ -190,7 +224,24 @@ class DeepOCsort:
         
         w = (z_track[:, None] + z_det[None, :]) / 2.0
         return w
-    
+
+    def compute_camera_motion(self, prev_frame, curr_frame):
+        # Optical flow로 카메라 이동량 추정
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+        flow = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None,
+                                            pyr_scale=0.5, levels=3, winsize=15,
+                                            iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+        # 전체 평균 이동량 (dx, dy)
+        dx = np.mean(flow[..., 0])
+        dy = np.mean(flow[..., 1])
+        return np.array([dx, dy])
+
+    def apply_camera_motion(self, bbox, motion):
+        x1, y1, x2, y2 = bbox
+        return [x1 - motion[0], y1 - motion[1], x2 - motion[0], y2 - motion[1]]
+
+
     def match(self, frame, detections, trackers, appearance_weight=0.5,iou_threshold=0.3 ,appearance_threshold=0.5):
         if len(trackers) == 0: # 트래커가 없으면 매칭할 필요 없음
             return [], [], list(range(len(detections))) 
@@ -238,9 +289,9 @@ class DeepOCsort:
                 else: 
                     appear_gate[i,j] = 0 
                 fin_gate[i,j] = appear_gate[i,j]*iou_gate[i,j]
-                w = self.compute_aw(appearance)
+                w = self.compute_aw(appearance) # AW !!
                 if fin_gate[i,j] == 1:
-                    cost_matrix[i, j] = cost_iou[i,j] + (appearance_weight + w[i,j])*appearance[i,j]
+                    cost_matrix[i, j] = cost_iou[i,j] + (appearance_weight + w[i,j])*appearance[i,j] # AW !!
                 else:
                     cost_matrix[i, j] = 1e5 
 
@@ -269,10 +320,14 @@ class DeepOCsort:
             4. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
             5. 트래커 삭제
         '''
+        if self.prev_frame is not None:
+            self.camera_motion = self.compute_camera_motion(self.prev_frame, frame)
+
         # 1. 기존 트래커 예측
         for trk in self.tracked_objects: # tracked_objects는 [{'id': id, 'kf': KalmanBox, 'bbox': [x1,y1,x2,y2]}, ...] 형태
             try:
                 trk['bbox'] = trk['kf'].predict()
+                trk['bbox'] = self.apply_camera_motion(trk['bbox'], self.camera_motion) # CMC(OCM)
                 trk['age'] += 1
             except ValueError as e:
                 print("\n====[TRACKING PREDICT ERROR]====")
@@ -306,7 +361,7 @@ class DeepOCsort:
                 track['z_t_minus_1'] = detection['bbox']
                 feat_track = np.array(track['feature'], dtype=np.float32)
                 feat_det = np.array(detection['feature'], dtype=np.float32)
-                track['feature'] = ema_alpha*feat_track + (1-ema_alpha)*feat_det
+                track['feature'] = ema_alpha*feat_track + (1-ema_alpha)*feat_det  # DA !!
                 feat_track = np.array(track['feature'], dtype=np.float32)
                 track['feature'] /= np.linalg.norm(feat_track) + 1e-6 # L2 정규화
 
@@ -326,11 +381,13 @@ class DeepOCsort:
                 virtual_obs_list.append(z_virtual)
             for z_virtual in virtual_obs_list:
                 track['kf'].predict()
-                track['bbox'] = track['kf'].update(z_virtual)
+                z_virtual_cm = self.apply_camera_motion(z_virtual, self.camera_motion)  # <-- CMC (OCR)
+                track['bbox'] = track['kf'].update(z_virtual_cm)
 
             # 마지막 진짜 detection으로 업데이트
+            z_end_cm = self.apply_camera_motion(z_end, self.camera_motion)
             track['kf'].predict()
-            track['bbox'] = track['kf'].update(z_end)
+            track['bbox'] = track['kf'].update(z_end_cm) # CMC (OOS)
             track['time_since_update'] = 0
             track['z_t_minus_2'] = track['z_t_minus_1']
             track['z_t_minus_1'] = z_end
@@ -363,6 +420,8 @@ class DeepOCsort:
             if self.tracked_objects[t]['time_since_update'] >= max_age:
                 del self.tracked_objects[t] # 아예 관측되었던 object에서 삭제
 
+        self.prev_frame = frame.copy()
+
         return self.tracked_objects
 
 # ===================== 메인 =====================
@@ -372,6 +431,13 @@ if __name__ == "__main__":
 
     frame_num = 0 
 
+    total_frames = 0
+    total_time = 0.0
+    total_latency = 0.0
+    extract_time = 0.0
+    update_time = 0.0
+
+    start_time = time.time()
     while cap.isOpened():
         success, frame = cap.read()
         
@@ -385,8 +451,22 @@ if __name__ == "__main__":
         
         print('현재',frame_num,'번째 frame')
 
-        detections = deepocsort.extract_detections(frame) 
+        total_frames += 1
+        frame_start = time.time()
+
+        t1 = time.time()
+        detections = deepocsort.extract_detections(frame)
+        t2 = time.time()
+        extract_time += (t2 - t1)
+
+        t3 = time.time()
         tracked = deepocsort.update(frame, detections, frame_num)
+        t4 = time.time()
+        update_time += (t4 - t3)
+
+        frame_end = time.time()
+        frame_latency = frame_end - frame_start
+        total_latency += frame_latency
 
         # 추적 결과 시각화
         for trk in tracked:
@@ -400,5 +480,26 @@ if __name__ == "__main__":
         
         frame_num += 1
 
+    end_time = time.time()
+    total_time = end_time - start_time
     cap.release()
     cv2.destroyAllWindows()
+
+    # ===================== 결과 출력 =====================
+    print(f"\n========== Performance Metrics ==========")
+    print(f"Total frames processed     : {total_frames}")
+    print(f"Total elapsed time         : {total_time:.2f} sec")
+    print(f"FPS                        : {total_frames / total_time:.2f}")
+    print(f"Avg latency per frame      : {total_latency / total_frames:.4f} sec")
+
+    print(f"Feature extraction time    : {extract_time:.2f} sec "
+          f"({(extract_time / total_time * 100):.1f}%)")
+    
+    print(f"Tracker update time        : {update_time:.2f} sec "
+          f"({(update_time / total_time * 100):.1f}%)")
+
+    other_overhead = total_time - (extract_time + update_time)
+    print(f"Other overhead (I/O, vis)  : {other_overhead:.2f} sec "
+          f"({(other_overhead / total_time * 100):.1f}%)")
+    
+    print(f"=========================================")
