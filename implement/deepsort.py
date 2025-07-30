@@ -10,6 +10,7 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 from encoder_model  import DeepSortEncoder
+import time
 
 
 #==================== 필요한 모델 정의 =========================
@@ -150,6 +151,7 @@ class Deepsort:
                         'bbox': [x1.item(), y1.item(), x2.item(), y2.item()],
                         'confidence': box.conf[0].item(),
                         'class': int(box.cls[0]),
+                        'feature' : np.zeros(128)
                     })
         return detections
 
@@ -217,7 +219,7 @@ class Deepsort:
             crop = frame[y1:y2, x1:x2]  
             feature = extract_feature_from_crop(crop, encoder, device='cpu')
             detection_features.append(feature)
-            detections[j]['feature'] = detection_features[j]
+            det['feature'] = feature
 
 
         for i, trk_idx in enumerate(trackers):
@@ -327,17 +329,22 @@ class Deepsort:
                 track['hits'] +=1
                 track['z_t_minus_2'] = track['z_t_minus_1']
                 track['z_t_minus_1'] = detection['bbox']
-                track['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
-                track['feature'] /= np.linalg.norm(track['feature']) + 1e-6 # L2 정규화
+                feat_track = np.array(track['feature'], dtype=np.float32)
+                feat_det = np.array(detection['feature'], dtype=np.float32)
+                track['feature'] = ema_alpha*feat_track + (1-ema_alpha)*feat_det  # DA !!
+                feat_track = np.array(track['feature'], dtype=np.float32)
+                track['feature'] /= np.linalg.norm(feat_track) + 1e-6 # L2 정규화
 
             if track['state'] == 'tentative':
                 track['hits'] +=1
                 track['time_since_update'] = 0
                 track['bbox'] = track['kf'].update(detection['bbox'])
                 track['z_t_minus_2'] = track['z_t_minus_1']
-                track['z_t_minus_1'] = detection['bbox']
-                track['feature'] = ema_alpha*track['feature'] + (1-ema_alpha)*detection['feature']
-                track['feature'] /= np.linalg.norm(track['feature']) + 1e-6
+                feat_track = np.array(track['feature'], dtype=np.float32)
+                feat_det = np.array(detection['feature'], dtype=np.float32)
+                track['feature'] = ema_alpha*feat_track + (1-ema_alpha)*feat_det  # DA !!
+                feat_track = np.array(track['feature'], dtype=np.float32)
+                track['feature'] /= np.linalg.norm(feat_track) + 1e-6 # L2 정규화
 
                 if track['hits'] >=3:
                     track['state'] = 'confirmed'
@@ -375,14 +382,16 @@ class Deepsort:
                 trk['bbox'] = trk['kf'].update(det['bbox'])
                 trk['z_t_minus_2'] = trk['z_t_minus_1']
                 trk['z_t_minus_1'] = det['bbox']
-                trk['feature'] = ema_alpha*trk['feature'] + (1-ema_alpha)*det['feature']
-                trk['feature'] /= np.linalg.norm(trk['feature']) + 1e-6
+                feat_track = np.array(trk['feature'], dtype=np.float32)
+                feat_det = np.array(det['feature'], dtype=np.float32)
+                trk['feature'] = ema_alpha*feat_track + (1-ema_alpha)*feat_det  # DA !!
+                feat_track = np.array(trk['feature'], dtype=np.float32)
+                trk['feature'] /= np.linalg.norm(feat_track) + 1e-6 # L2 정규화
 
         # 5. 두번째 매칭에 의해 새로 발견한 객체 업데이트(new track)
         for d in unmatched_detections_2:
             self.track_id += 1
             kf = KalmanBox(detections[d]['bbox'])
-            detections[d]['feature']/= np.linalg.norm(detections[d]['feautre']) + 1e-6
             self.tracked_objects.append({
                 'id': self.track_id,
                 'kf': kf,
@@ -414,9 +423,17 @@ class Deepsort:
 # ===================== 메인 =====================
 if __name__ == "__main__":
     deepsort = Deepsort()
-    cap = cv2.VideoCapture("dongwon_building-09.avi")
+    cap = cv2.VideoCapture("dongwon_building-13.avi")
 
     frame_num = 0 
+
+    total_frames = 0
+    total_time = 0.0
+    total_latency = 0.0
+    extract_time = 0.0
+    update_time = 0.0
+
+    start_time = time.time()
 
     while cap.isOpened():
         success, frame = cap.read()
@@ -428,10 +445,23 @@ if __name__ == "__main__":
             print("Failed to read frame from video.")
             break
         
+        total_frames += 1
+        frame_start = time.time()
+        
         print('현재',frame_num,'번째 frame')
+        t1 = time.time()
+        detections = deepsort.extract_detections(frame)
+        t2 = time.time()
+        extract_time += (t2 - t1)       
 
-        detections = deepsort.extract_detections(frame) 
+        t3 = time.time()
         tracked = deepsort.update(frame, detections)
+        t4 = time.time()
+        update_time += (t4 - t3)
+
+        frame_end = time.time()
+        frame_latency = frame_end - frame_start
+        total_latency += frame_latency
 
         # 추적 결과 시각화
         for trk in tracked:
@@ -445,5 +475,26 @@ if __name__ == "__main__":
         
         frame_num += 1
 
+    end_time = time.time()
+    total_time = end_time - start_time
     cap.release()
     cv2.destroyAllWindows()
+
+    # ===================== 결과 출력 =====================
+    print(f"\n========== Performance Metrics ==========")
+    print(f"Total frames processed     : {total_frames}")
+    print(f"Total elapsed time         : {total_time:.2f} sec")
+    print(f"FPS                        : {total_frames / total_time:.2f}")
+    print(f"Avg latency per frame      : {total_latency / total_frames:.4f} sec")
+
+    print(f"Feature extraction time    : {extract_time:.2f} sec "
+          f"({(extract_time / total_time * 100):.1f}%)")
+    
+    print(f"Tracker update time        : {update_time:.2f} sec "
+          f"({(update_time / total_time * 100):.1f}%)")
+
+    other_overhead = total_time - (extract_time + update_time)
+    print(f"Other overhead (I/O, vis)  : {other_overhead:.2f} sec "
+          f"({(other_overhead / total_time * 100):.1f}%)")
+
+    print(f"=========================================")
