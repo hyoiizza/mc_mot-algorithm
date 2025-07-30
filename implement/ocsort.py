@@ -1,6 +1,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import time
 import numpy as np
 import cv2
 from ultralytics import YOLO
@@ -118,7 +119,7 @@ class OCSort:
         results = self.detection(frame)
         for result in results:
             for box in result.boxes:
-                if int(box.cls[0]) in [2, 3]: 
+                if int(box.cls[0]) in [2,3]: 
                     x1, y1, x2, y2 = box.xyxy[0]
                     detections.append({
                         'bbox': [x1.item(), y1.item(), x2.item(), y2.item()],
@@ -270,10 +271,18 @@ class OCSort:
 # ===================== 메인 =====================
 if __name__ == "__main__":
     ocsort = OCSort()
-    cap = cv2.VideoCapture("dongwon_building-09.avi")
+    cap = cv2.VideoCapture("dongwon_building-13.avi")
 
+    total_frames = 0
+    total_time = 0.0
+    total_latency = 0.0
+    extract_time = 0.0
+    update_time = 0.0
+
+    
     frame_num = 0 
 
+    start_time = time.time()
     while cap.isOpened():
         success, frame = cap.read()
         
@@ -284,10 +293,22 @@ if __name__ == "__main__":
         if not success:
             print("Failed to read frame from video.")
             break
-        
-    
-        detections = ocsort.extract_detections(frame) 
+        total_frames += 1
+        frame_start = time.time()
+
+        t1 = time.time()
+        detections = ocsort.extract_detections(frame)
+        t2 = time.time()
+        extract_time += (t2 - t1)
+
+        t3 = time.time()
         tracked = ocsort.update(detections,frame_num)
+        t4 = time.time()
+        update_time += (t4 - t3)
+
+        frame_end = time.time()
+        frame_latency = frame_end - frame_start
+        total_latency += frame_latency
 
         # 추적 결과 시각화
         for trk in tracked:
@@ -301,8 +322,27 @@ if __name__ == "__main__":
             break
 
         frame_num += 1
-        print('현재',frame_num,'번째 frame')
-    for t in ocsort.tracked_objects:
-        print(ocsort.tracked_objects[t]['id'])
+    
+    end_time = time.time()
+    total_time = end_time - start_time
     cap.release()
     cv2.destroyAllWindows()
+
+    # ===================== 결과 출력 =====================
+    print(f"\n========== Performance Metrics ==========")
+    print(f"Total frames processed     : {total_frames}")
+    print(f"Total elapsed time         : {total_time:.2f} sec")
+    print(f"FPS                        : {total_frames / total_time:.2f}")
+    print(f"Avg latency per frame      : {total_latency / total_frames:.4f} sec")
+
+    print(f"Feature extraction time    : {extract_time:.2f} sec "
+          f"({(extract_time / total_time * 100):.1f}%)")
+    
+    print(f"Tracker update time        : {update_time:.2f} sec "
+          f"({(update_time / total_time * 100):.1f}%)")
+
+    other_overhead = total_time - (extract_time + update_time)
+    print(f"Other overhead (I/O, vis)  : {other_overhead:.2f} sec "
+          f"({(other_overhead / total_time * 100):.1f}%)")
+
+    print(f"=========================================")
